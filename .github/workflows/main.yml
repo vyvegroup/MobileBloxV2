@@ -1,0 +1,131 @@
+name: Build MobileBloxV2
+
+on: 
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r25c
+        link-to-sdk: true
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build
+
+    - name: Create CMakeLists.txt
+      shell: bash
+      run: |
+        tee NativeLib/CMakeLists.txt > /dev/null <<'CMAKEOF'
+        cmake_minimum_required(VERSION 3.16)
+        project(MobileBloxV2)
+        set(CMAKE_CXX_STANDARD 17)
+        include_directories(
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/VM/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/VM/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Common/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Ast/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Compiler/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/curl/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/cpr/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dobby/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/imgui
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/ixwebsocket
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/lz4/lib
+        )
+        file(GLOB LUAU_VM_SRC dependencies/luau/VM/src/*.cpp)
+        file(GLOB LUAU_COMPILER_SRC dependencies/luau/Compiler/src/*.cpp)
+        file(GLOB LUAU_AST_SRC dependencies/luau/Ast/src/*.cpp)
+        file(GLOB_RECURSE SOURCES "*.cpp")
+        list(FILTER SOURCES EXCLUDE REGEX "dependencies/luau/.*")
+        add_library(mobileblox SHARED
+            ${SOURCES}
+            ${LUAU_VM_SRC}
+            ${LUAU_COMPILER_SRC}
+            ${LUAU_AST_SRC}
+        )
+        target_compile_definitions(mobileblox PRIVATE
+            ANDROID
+            LUAU_FASTFLAG_LUAERRORRESPONSE
+        )
+        find_library(log-lib log)
+        find_library(android-lib android)
+        target_link_libraries(mobileblox
+            ${log-lib}
+            ${android-lib}
+        )
+        CMAKEOF
+        sed -i 's/^        //' NativeLib/CMakeLists.txt
+        echo "=== Generated CMakeLists.txt ==="
+        cat NativeLib/CMakeLists.txt
+
+    - name: Build ARM32
+      run: |
+        cd NativeLib
+        mkdir -p build-arm32 && cd build-arm32
+        cmake -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+              -DANDROID_ABI=armeabi-v7a \
+              -DANDROID_PLATFORM=android-21 \
+              -DCMAKE_BUILD_TYPE=Release \
+              .. 2>&1 | tee cmake.log
+        
+        echo "=== Starting build ==="
+        ninja 2>&1 | tee build.log
+        BUILD_EXIT=$?
+        
+        echo "=== Build exit code: $BUILD_EXIT ==="
+        
+        echo "=== Searching for .so files ==="
+        find . -name "*.so" -type f 2>/dev/null
+        find .. -name "*.so" -type f 2>/dev/null
+        
+        if [ $BUILD_EXIT -ne 0 ]; then
+          echo "=== BUILD FAILED - Last 100 lines ==="
+          tail -100 build.log
+          exit 1
+        fi
+
+    - name: Find and prepare artifacts
+      run: |
+        echo "=== Searching entire workspace for .so files ==="
+        find $GITHUB_WORKSPACE -name "*.so" -type f 2>/dev/null
+        
+        echo "=== Listing build directory ==="
+        ls -laR NativeLib/build-arm32/ 2>/dev/null || echo "build-arm32 not found"
+        
+        mkdir -p artifacts
+        find NativeLib/ -name "libmobileblox.so" -exec cp {} artifacts/ \; 2>/dev/null
+        ls -la artifacts/
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mobileblox-lib
+        path: artifacts/
+        retention-days: 7
+        if-no-files-found: warn
+
+    - name: Upload build logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build-logs
+        path: |
+          NativeLib/build-arm32/build.log
+          NativeLib/build-arm32/cmake.log
+        retention-days: 3
+        if-no-files-found: ignore
