@@ -1,6 +1,6 @@
 name: Build MobileBloxV2
 
-on: 
+on:
   push:
     branches: [ main ]
   workflow_dispatch:
@@ -8,212 +8,207 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      
+
     - name: Setup Android NDK
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r25c
         link-to-sdk: true
-        
+
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y cmake ninja-build
 
-    - name: Patch source files
-      shell: bash
+    - name: Write patch script
       run: |
-        set -e
+        cat > /tmp/patch.py << 'PYEOF'
+        import os
+        import subprocess
 
-        # Create utils directory
-        mkdir -p NativeLib/utils
+        os.makedirs("NativeLib/utils", exist_ok=True)
 
-        # Create logging header using Python to avoid YAML indentation issues
-        python3 -c "
-import os
-content = '''#pragma once
-#include <android/log.h>
-#ifndef LOG_TAG
-#define LOG_TAG \"MobileBlox\"
-#endif
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-'''
-with open('NativeLib/utils/logging.hpp', 'w') as f:
-    f.write(content)
-print('Created logging.hpp')
-"
+        # Create logging.hpp
+        with open("NativeLib/utils/logging.hpp", "w") as f:
+            f.write('#pragma once\n')
+            f.write('#include <android/log.h>\n')
+            f.write('#ifndef LOG_TAG\n#define LOG_TAG "MobileBlox"\n#endif\n')
+            f.write('#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)\n')
+            f.write('#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)\n')
+            f.write('#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)\n')
+            f.write('#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)\n')
+        print("Created logging.hpp")
 
-        # Create exploit_configuration header using Python
-        python3 -c "
-content = '''#pragma once
-#include <string>
+        # Create exploit_configuration.hpp
+        with open("NativeLib/utils/exploit_configuration.hpp", "w") as f:
+            f.write('#pragma once\n')
+            f.write('#include <string>\n\n')
+            f.write('namespace exploit_configuration {\n')
+            f.write('    const std::string exploit_name = "MobileBlox";\n')
+            f.write('    const std::string exploit_luaChunk = "@MB";\n')
+            f.write('    const std::string exploit_version = "2.0.0";\n')
+            f.write('    const std::string roblox_exploit_version = "2.603.563";\n')
+            f.write('}\n')
+        print("Created exploit_configuration.hpp")
 
-namespace exploit_configuration {
-    const std::string exploit_name = \"MobileBlox\";
-    const std::string exploit_luaChunk = \"@MB\";
-    const std::string exploit_version = \"2.0.0\";
-    const std::string roblox_exploit_version = \"2.603.563\";
-}
-'''
-with open('NativeLib/utils/exploit_configuration.hpp', 'w') as f:
-    f.write(content)
-print('Created exploit_configuration.hpp')
-"
+        # Patch utils.hpp with jni.h
+        utils_hpp = "NativeLib/utils/utils.hpp"
+        if os.path.exists(utils_hpp):
+            with open(utils_hpp, "r") as f:
+                content = f.read()
+            if '#include <jni.h>' not in content:
+                content = '#include <jni.h>\n' + content
+                with open(utils_hpp, "w") as f:
+                    f.write(content)
+                print("Patched utils.hpp with jni.h")
 
-        # Add jni.h to utils.hpp if missing
-        if [ -f "NativeLib/utils/utils.hpp" ]; then
-          if ! grep -q '#include <jni.h>' NativeLib/utils/utils.hpp; then
-            sed -i '1i #include <jni.h>' NativeLib/utils/utils.hpp
-            echo "Patched utils.hpp with jni.h"
-          fi
-        fi
+        # Find all source files (non-dependency)
+        source_files = []
+        for root, dirs, files in os.walk("NativeLib"):
+            if "dependencies" in root:
+                continue
+            for fname in files:
+                if fname.endswith((".cpp", ".hpp", ".h")):
+                    source_files.append(os.path.join(root, fname))
 
-        # Patch files using LOGD/LOGI/LOGE/LOGW - add logging include
-        find NativeLib/ -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "*.h" \) \
-          ! -path "*/dependencies/*" \
-          ! -name "logging.hpp" | while read file; do
-          if grep -q 'LOGD\|LOGI\|LOGE\|LOGW' "$file"; then
-            if ! grep -q 'logging.hpp\|android/log.h\|define LOGD' "$file"; then
-              REL_PATH=$(python3 -c "
-import os.path
-src = os.path.dirname('$file')
-dst = 'NativeLib/utils/logging.hpp'
-print(os.path.relpath(dst, src))
-")
-              sed -i "1i #include \"$REL_PATH\"" "$file"
-              echo "Patched $file with logging include"
-            fi
-          fi
-        done
+        for filepath in source_files:
+            fname = os.path.basename(filepath)
+            if fname in ("logging.hpp", "exploit_configuration.hpp"):
+                continue
 
-        # Patch files using exploit_configuration - add exploit_configuration include
-        find NativeLib/ -type f \( -name "*.cpp" -o -name "*.hpp" \) \
-          ! -path "*/dependencies/*" \
-          ! -name "exploit_configuration.hpp" | while read file; do
-          if grep -q 'exploit_configuration::' "$file"; then
-            if ! grep -q 'exploit_configuration\.hpp\|pch\.hpp' "$file"; then
-              REL_PATH=$(python3 -c "
-import os.path
-src = os.path.dirname('$file')
-dst = 'NativeLib/utils/exploit_configuration.hpp'
-print(os.path.relpath(dst, src))
-")
-              sed -i "1i #include \"$REL_PATH\"" "$file"
-              echo "Patched $file with exploit_configuration include: $REL_PATH"
-            fi
-          fi
-        done
+            with open(filepath, "r") as f:
+                content = f.read()
 
-        echo "=== All patching complete ==="
+            original = content
+
+            # Add logging include if needed
+            if any(m in content for m in ("LOGD", "LOGI", "LOGE", "LOGW")):
+                if "logging.hpp" not in content and "android/log.h" not in content and "#define LOGD" not in content:
+                    rel = os.path.relpath("NativeLib/utils/logging.hpp", os.path.dirname(filepath))
+                    content = f'#include "{rel}"\n' + content
+
+            # Add exploit_configuration include if needed
+            if "exploit_configuration::" in content:
+                if "exploit_configuration.hpp" not in content and "pch.hpp" not in content:
+                    rel = os.path.relpath("NativeLib/utils/exploit_configuration.hpp", os.path.dirname(filepath))
+                    content = f'#include "{rel}"\n' + content
+
+            if content != original:
+                with open(filepath, "w") as f:
+                    f.write(content)
+                print(f"Patched: {filepath}")
+        PYEOF
+
+    - name: Patch source files
+      run: python3 /tmp/patch.py
+
+    - name: Write CMake script
+      run: |
+        cat > /tmp/gen_cmake.py << 'PYEOF'
+        content = """cmake_minimum_required(VERSION 3.16)
+        project(MobileBloxV2)
+        set(CMAKE_CXX_STANDARD 17)
+
+        include_directories(
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/VM/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/VM/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Common/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Ast/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Compiler/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/curl/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/cpr/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dobby/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/imgui
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/ixwebsocket
+            ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/lz4/lib
+        )
+
+        file(GLOB LUAU_VM_SRC dependencies/luau/VM/src/*.cpp)
+        file(GLOB LUAU_COMPILER_SRC dependencies/luau/Compiler/src/*.cpp)
+        file(GLOB LUAU_AST_SRC dependencies/luau/Ast/src/*.cpp)
+        file(GLOB_RECURSE SOURCES "*.cpp")
+        list(FILTER SOURCES EXCLUDE REGEX "dependencies/luau/.*")
+
+        add_library(mobileblox SHARED
+            ${SOURCES}
+            ${LUAU_VM_SRC}
+            ${LUAU_COMPILER_SRC}
+            ${LUAU_AST_SRC}
+        )
+
+        target_compile_definitions(mobileblox PRIVATE
+            ANDROID
+            LUAU_FASTFLAG_LUAERRORRESPONSE
+            LOG_TAG="MobileBlox"
+        )
+
+        set(CURL_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/curl/armeabi-v7a)
+        set(DOBBY_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dobby/armeabi-v7a)
+
+        add_library(curl_static STATIC IMPORTED)
+        set_target_properties(curl_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libcurl_static.a)
+        add_library(crypto_static STATIC IMPORTED)
+        set_target_properties(crypto_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libcrypto_static.a)
+        add_library(ssl_static STATIC IMPORTED)
+        set_target_properties(ssl_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libssl_static.a)
+        add_library(nghttp2_static STATIC IMPORTED)
+        set_target_properties(nghttp2_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libnghttp2_static.a)
+        add_library(nghttp3_static STATIC IMPORTED)
+        set_target_properties(nghttp3_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libnghttp3_static.a)
+        add_library(ngtcp2_static STATIC IMPORTED)
+        set_target_properties(ngtcp2_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libngtcp2_static.a)
+        add_library(ngtcp2_crypto_static STATIC IMPORTED)
+        set_target_properties(ngtcp2_crypto_static PROPERTIES IMPORTED_LOCATION ${CURL_LIB_DIR}/libngtcp2_crypto_static.a)
+        add_library(dobby STATIC IMPORTED)
+        set_target_properties(dobby PROPERTIES IMPORTED_LOCATION ${DOBBY_LIB_DIR}/libdobby.a)
+
+        find_library(log-lib log)
+        find_library(android-lib android)
+        find_library(z-lib z)
+        find_library(m-lib m)
+        find_library(EGL-lib EGL)
+        find_library(GLESv3-lib GLESv3)
+
+        target_link_libraries(mobileblox
+            ${log-lib}
+            ${android-lib}
+            ${z-lib}
+            ${m-lib}
+            ${EGL-lib}
+            ${GLESv3-lib}
+            curl_static
+            crypto_static
+            ssl_static
+            nghttp2_static
+            nghttp3_static
+            ngtcp2_static
+            ngtcp2_crypto_static
+            dobby
+            c++_shared
+        )
+        """
+        # Dedent the content
+        lines = content.split('\n')
+        min_indent = 999
+        for line in lines:
+            if line.strip():
+                min_indent = min(min_indent, len(line) - len(line.lstrip()))
+        if min_indent < 999:
+            lines = [line[min_indent:] if len(line) >= min_indent else line for line in lines]
+        with open("NativeLib/CMakeLists.txt", "w") as f:
+            f.write('\n'.join(lines))
+        print("CMakeLists.txt created")
+        PYEOF
 
     - name: Create CMakeLists.txt
-      shell: bash
-      run: |
-        set -e
-        python3 -c "
-content = '''cmake_minimum_required(VERSION 3.16)
-project(MobileBloxV2)
-set(CMAKE_CXX_STANDARD 17)
-
-include_directories(
-    \${CMAKE_CURRENT_SOURCE_DIR}
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/VM/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/VM/src
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Common/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Ast/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/luau/Compiler/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/curl/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/cpr/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dobby/include
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/imgui
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/ixwebsocket
-    \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/lz4/lib
-)
-
-file(GLOB LUAU_VM_SRC dependencies/luau/VM/src/*.cpp)
-file(GLOB LUAU_COMPILER_SRC dependencies/luau/Compiler/src/*.cpp)
-file(GLOB LUAU_AST_SRC dependencies/luau/Ast/src/*.cpp)
-file(GLOB_RECURSE SOURCES \"*.cpp\")
-list(FILTER SOURCES EXCLUDE REGEX \"dependencies/luau/.*\")
-
-add_library(mobileblox SHARED
-    \${SOURCES}
-    \${LUAU_VM_SRC}
-    \${LUAU_COMPILER_SRC}
-    \${LUAU_AST_SRC}
-)
-
-target_compile_definitions(mobileblox PRIVATE
-    ANDROID
-    LUAU_FASTFLAG_LUAERRORRESPONSE
-    LOG_TAG=\"MobileBlox\"
-)
-
-set(CURL_LIB_DIR \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/curl/armeabi-v7a)
-set(DOBBY_LIB_DIR \${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dobby/armeabi-v7a)
-
-add_library(curl_static STATIC IMPORTED)
-set_target_properties(curl_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libcurl_static.a)
-
-add_library(crypto_static STATIC IMPORTED)
-set_target_properties(crypto_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libcrypto_static.a)
-
-add_library(ssl_static STATIC IMPORTED)
-set_target_properties(ssl_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libssl_static.a)
-
-add_library(nghttp2_static STATIC IMPORTED)
-set_target_properties(nghttp2_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libnghttp2_static.a)
-
-add_library(nghttp3_static STATIC IMPORTED)
-set_target_properties(nghttp3_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libnghttp3_static.a)
-
-add_library(ngtcp2_static STATIC IMPORTED)
-set_target_properties(ngtcp2_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libngtcp2_static.a)
-
-add_library(ngtcp2_crypto_static STATIC IMPORTED)
-set_target_properties(ngtcp2_crypto_static PROPERTIES IMPORTED_LOCATION \${CURL_LIB_DIR}/libngtcp2_crypto_static.a)
-
-add_library(dobby STATIC IMPORTED)
-set_target_properties(dobby PROPERTIES IMPORTED_LOCATION \${DOBBY_LIB_DIR}/libdobby.a)
-
-find_library(log-lib log)
-find_library(android-lib android)
-find_library(z-lib z)
-find_library(m-lib m)
-find_library(EGL-lib EGL)
-find_library(GLESv3-lib GLESv3)
-
-target_link_libraries(mobileblox
-    \${log-lib}
-    \${android-lib}
-    \${z-lib}
-    \${m-lib}
-    \${EGL-lib}
-    \${GLESv3-lib}
-    curl_static
-    crypto_static
-    ssl_static
-    nghttp2_static
-    nghttp3_static
-    ngtcp2_static
-    ngtcp2_crypto_static
-    dobby
-    c++_shared
-)
-'''
-with open('NativeLib/CMakeLists.txt', 'w') as f:
-    f.write(content)
-print('CMakeLists.txt created')
-"
+      run: python3 /tmp/gen_cmake.py
 
     - name: Build ARM32
       shell: bash
